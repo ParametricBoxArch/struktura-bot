@@ -441,13 +441,40 @@ def cmd_new_request(m):
 
 # ── Main message handler ──────────────────────────────────────────────────────
 
-@bot.message_handler(func=lambda m: True, content_types=["text", "photo"])
+@bot.message_handler(func=lambda m: True, content_types=["text", "photo", "document"])
 def handle_message(m):
     uid = m.from_user.id
     sess = s(uid)
     step = sess.get("step")
     cid = m.chat.id
     text = m.text or m.caption or ""
+
+    # Файл-изображение (PNG, JPG и т.д. отправленные без сжатия)
+    if m.document and m.document.mime_type and m.document.mime_type.startswith("image/"):
+        file_id = m.document.file_id
+        if file_id not in sess["photos"]:
+            sess["photos"].append(file_id)
+            db_add_photo(uid, file_id)
+        count = len(sess["photos"])
+        if step == "confirm":
+            if file_id not in sess.get("selected_photos", []):
+                sess.setdefault("selected_photos", []).append(file_id)
+            sess["email_body"] = None
+            bot.send_message(cid,
+                f"Скриншот добавлен к письму! Всего вложений: {len(sess['selected_photos'])} шт.\n\n"
+                "Выбери действие:",
+                reply_markup=kb_confirm())
+        elif step not in (None,):
+            bot.send_message(cid, f"Скриншот сохранён (всего: {count} шт.)")
+        else:
+            bot.send_message(cid,
+                f"Скриншот сохранён. Всего накоплено: {count} шт.\n"
+                "Нажми 📝 Новая заявка чтобы оформить.")
+        return
+
+    if m.document:
+        # Не изображение — игнорируем
+        return
 
     if m.photo:
         file_id = m.photo[-1].file_id
@@ -575,7 +602,10 @@ def _show_photo_selection(uid, cid):
         try:
             bot.send_photo(cid, fid, caption=f"Скриншот {i}")
         except Exception:
-            pass
+            try:
+                bot.send_document(cid, fid, caption=f"Скриншот {i}")
+            except Exception:
+                pass
     bot.send_message(cid,
         f"Шаг 5а: У тебя {len(all_ids)} скриншот(ов).\n"
         "Выбери какие прикрепить к письму:",
