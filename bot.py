@@ -257,16 +257,20 @@ def send_email(subject, body, to_list, photo_paths=None):
                         img.add_header("Content-Disposition", "attachment",
                                        filename=f"screenshot_{i}.{path.split('.')[-1]}")
                         msg.attach(img)
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as srv:
+        print(f"Connecting to {SMTP_HOST}:{SMTP_PORT}...")
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
             srv.ehlo()
             srv.starttls()
             srv.ehlo()
+            print(f"Logging in as {EMAIL_FROM}...")
             srv.login(EMAIL_FROM, EMAIL_PASSWORD)
+            print(f"Sending to {to_list}...")
             srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
-        return True
+        print("Email sent OK")
+        return True, None
     except Exception as e:
-        print("Email error:", e)
-        return False
+        print(f"Email error: {type(e).__name__}: {e}")
+        return False, f"{type(e).__name__}: {e}"
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
@@ -691,7 +695,7 @@ def cb_confirm(c):
         body = sess.get("email_body") or build_email(sess)
         sess["email_body"] = body
         bot.send_message(cid, "Отправляю письмо...")
-        ok = send_email(subject, body, to_list, photo_paths)
+        ok, err = send_email(subject, body, to_list, photo_paths)
         if ok:
             save_request(sess)
             attach_info = f" + {len(photo_paths)} скриншот(ов)" if photo_paths else ""
@@ -706,7 +710,7 @@ def cb_confirm(c):
             kb.add(types.InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="draft_retry"))
             kb.add(types.InlineKeyboardButton(text="✏️ Вернуться к письму", callback_data="draft_resume"))
             bot.send_message(cid,
-                "Ошибка отправки письма. Данные сохранены — попробуй снова:",
+                f"Ошибка отправки письма:\n{err}\n\nДанные сохранены — попробуй снова:",
                 reply_markup=kb)
             sess["step"] = "confirm"
 
