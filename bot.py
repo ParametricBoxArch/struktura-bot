@@ -431,6 +431,15 @@ def cmd_prices(m):
         "Текущие тарифы:\n\n" + "\n".join(lines) + "\n\nНажми чтобы изменить:",
         reply_markup=kb_prices(prices))
 
+@bot.message_handler(commands=["debug"])
+def cmd_debug(m):
+    uid = m.from_user.id
+    photos = db_get_photos(uid)
+    bot.send_message(m.chat.id,
+        f"DB файл: {DB}\n"
+        f"Фото в базе: {len(photos)} шт.\n"
+        f"Фото в сессии: {len(s(uid).get('photos', []))} шт.")
+
 @bot.message_handler(commands=["new_request"])
 @bot.message_handler(func=lambda m: m.text == "📝 Новая заявка")
 def cmd_new_request(m):
