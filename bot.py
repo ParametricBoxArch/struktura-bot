@@ -1,15 +1,10 @@
 import telebot
 import sqlite3
-import smtplib
-import ssl
-import socket
 import re
 import os
+import base64
 import requests
 from telebot import types
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.image import MIMEImage
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -17,8 +12,8 @@ load_dotenv()
 
 TOKEN = os.getenv("BOT_TOKEN", "8630425742:AAHcnb8KBZt8rScUPWGjXde6pyHkjnAO8Sg")
 EMAIL_FROM = "info@parametricbox.com"
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "xhdgjemunutbkmrh")
-SENDER_NAME = "Устина Алёна, руководитель Parametric Box"
+SENDER_NAME = "Parametric Box"
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
 DB = "struktura.db"
 PHOTOS_DIR = "photos"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
@@ -243,58 +238,40 @@ def download_photo(file_id):
 
 def send_email(subject, body, to_list, photo_paths=None):
     try:
-        msg = MIMEMultipart()
-        msg["From"] = f"{SENDER_NAME} <{EMAIL_FROM}>"
-        msg["To"] = ", ".join(to_list)
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
+        attachments = []
         if photo_paths:
             for i, path in enumerate(photo_paths, 1):
                 if path and os.path.exists(path):
                     with open(path, "rb") as f:
-                        img = MIMEImage(f.read())
-                        img.add_header("Content-Disposition", "attachment",
-                                       filename=f"screenshot_{i}.{path.split('.')[-1]}")
-                        msg.attach(img)
+                        content = base64.b64encode(f.read()).decode()
+                    ext = path.split(".")[-1]
+                    attachments.append({"name": f"screenshot_{i}.{ext}", "content": content})
 
-        # Принудительно используем IPv4 — Railway иначе пытается IPv6 и получает ошибку
-        try:
-            smtp_ip = socket.getaddrinfo("smtp.gmail.com", None, socket.AF_INET)[0][4][0]
-        except Exception:
-            smtp_ip = "smtp.gmail.com"
+        data = {
+            "sender": {"name": SENDER_NAME, "email": EMAIL_FROM},
+            "to": [{"email": e} for e in to_list],
+            "subject": subject,
+            "textContent": body,
+        }
+        if attachments:
+            data["attachment"] = attachments
 
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json"},
+            json=data,
+            timeout=30,
+        )
 
-        errors = []
-
-        # Попытка 1: SSL порт 465
-        try:
-            with smtplib.SMTP_SSL(smtp_ip, 465, timeout=30, context=ctx) as srv:
-                srv.login(EMAIL_FROM, EMAIL_PASSWORD)
-                srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
-            print("Email sent OK via 465")
+        if resp.status_code in (200, 201, 202):
+            print(f"Email sent OK via Brevo to {to_list}")
             return True, None
-        except Exception as e:
-            errors.append(f"465: {e}")
 
-        # Попытка 2: STARTTLS порт 587
-        try:
-            with smtplib.SMTP(smtp_ip, 587, timeout=30) as srv:
-                srv.ehlo()
-                srv.starttls(context=ctx)
-                srv.ehlo()
-                srv.login(EMAIL_FROM, EMAIL_PASSWORD)
-                srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
-            print("Email sent OK via 587")
-            return True, None
-        except Exception as e:
-            errors.append(f"587: {e}")
-
-        return False, "\n".join(errors)
+        print(f"Brevo error {resp.status_code}: {resp.text}")
+        return False, f"Brevo {resp.status_code}: {resp.text}"
 
     except Exception as e:
+        print(f"send_email exception: {e}")
         return False, str(e)
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
