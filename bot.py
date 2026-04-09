@@ -222,9 +222,8 @@ def build_email(s):
         f"  - Стоимость: {fmt(s['total'])}\n\n"
         f"Просим подтвердить получение данной заявки и готовность приступить "
         f"к её выполнению в указанные сроки.\n\n"
-        f"С уважением,\n\n"
-        f"Устина Алёна\n\n"
-        f"руководитель Parametric Box"
+        f"С уважением,\n"
+        f"Parametric Box"
     )
 
 def download_photo(file_id):
@@ -312,16 +311,22 @@ def kb_categories(prices):
     kb.add(types.InlineKeyboardButton(text="← Назад", callback_data="back_client_tg"))
     return kb
 
-def kb_recipients(selected):
+def kb_recipients(selected, custom_recipients=None):
     kb = types.InlineKeyboardMarkup()
     for i, c in enumerate(CONTACTS):
         mark = "✅" if i in selected else "☐"
         kb.add(types.InlineKeyboardButton(
             text=f"{mark}  {c['name']} — {c['title']}",
             callback_data=f"rcpt_{i}"))
+    if custom_recipients:
+        for i, email in enumerate(custom_recipients):
+            kb.add(types.InlineKeyboardButton(
+                text=f"✅  {email}  ❌ удалить",
+                callback_data=f"rcpt_del_{i}"))
     kb.row(
         types.InlineKeyboardButton(text="Выбрать всех", callback_data="rcpt_all"),
         types.InlineKeyboardButton(text="Снять всех",   callback_data="rcpt_none"))
+    kb.add(types.InlineKeyboardButton(text="✉️ Добавить свой email", callback_data="rcpt_add"))
     kb.row(
         types.InlineKeyboardButton(text="← Назад",             callback_data="back_photos"),
         types.InlineKeyboardButton(text="➡️ Показать письмо",  callback_data="rcpt_done"))
@@ -376,9 +381,12 @@ def show_email_preview(uid, cid):
     subject = f"Заявка №{sess['number']} — {sess['task_name']}"
     sess["subject"] = subject
 
-    rcpt_lines = "\n".join(
+    rcpt_lines_list = [
         f"  • {CONTACTS[i]['name']} ({CONTACTS[i]['title']})"
-        for i in sess["selected"])
+        for i in sess["selected"] if i < len(CONTACTS)
+    ]
+    rcpt_lines_list += [f"  • {e}" for e in sess.get("custom_recipients", [])]
+    rcpt_lines = "\n".join(rcpt_lines_list)
 
     selected_photos = sess.get("selected_photos", [])
     attach_note = (f"\nВложений: {len(selected_photos)} скриншот(ов)"
@@ -526,6 +534,18 @@ def handle_message(m):
         show_email_preview(uid, cid)
         return
 
+    if step == "add_recipient":
+        email = text.strip()
+        if "@" not in email or "." not in email:
+            bot.send_message(cid, "Неверный формат. Введи корректный email, например: name@company.ru")
+            return
+        sess.setdefault("custom_recipients", []).append(email)
+        sess["step"] = "recipients"
+        bot.send_message(cid,
+            f"Email {email} добавлен.\n\nВыбери получателей:",
+            reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
+        return
+
     if step == "task_name":
         if not text:
             bot.send_message(cid, "Введи название задачи текстом:")
@@ -568,7 +588,7 @@ def handle_message(m):
         else:
             sess["step"] = "recipients"
             bot.send_message(cid, "Шаг 5/5: Выбери получателей письма:",
-                             reply_markup=kb_recipients(sess["selected"]))
+                             reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
 
 def _show_photo_selection(uid, cid):
     sess = s(uid)
@@ -643,7 +663,7 @@ def cb_photos(c):
         bot.send_message(cid,
             f"Выбрано скриншотов: {len(sess['selected_photos'])} шт.\n\n"
             "Выбери получателей письма:",
-            reply_markup=kb_recipients(sess["selected"]))
+            reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
         return
     else:
         idx = int(action)
@@ -667,14 +687,25 @@ def cb_recipients(c):
         sess["selected"] = list(range(len(CONTACTS)))
     elif action == "none":
         sess["selected"] = []
+    elif action == "add":
+        bot.answer_callback_query(c.id)
+        sess["step"] = "add_recipient"
+        bot.send_message(cid, "Введи email получателя:")
+        return
     elif action == "done":
-        if not sess.get("selected"):
+        if not sess.get("selected") and not sess.get("custom_recipients"):
             bot.answer_callback_query(c.id, "Выбери хотя бы одного получателя!", show_alert=True)
             return
         bot.answer_callback_query(c.id)
         sess["email_body"] = None
         show_email_preview(uid, cid)
         return
+    elif action.startswith("del_"):
+        idx = int(action.replace("del_", ""))
+        custom = sess.get("custom_recipients", [])
+        if 0 <= idx < len(custom):
+            custom.pop(idx)
+        sess["custom_recipients"] = custom
     else:
         idx = int(action)
         if idx in sess["selected"]:
@@ -683,7 +714,7 @@ def cb_recipients(c):
             sess["selected"].append(idx)
     bot.answer_callback_query(c.id)
     bot.edit_message_reply_markup(cid, c.message.message_id,
-                                  reply_markup=kb_recipients(sess["selected"]))
+                                  reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_"))
 def cb_confirm(c):
@@ -702,11 +733,14 @@ def cb_confirm(c):
     if action == "send":
         bot.answer_callback_query(c.id)
         to_list = [CONTACTS[i]["email"] for i in sess["selected"] if i < len(CONTACTS)]
+        to_list += sess.get("custom_recipients", [])
         if not to_list:
             bot.send_message(cid, "Нет получателей. Выбери получателей и попробуй снова.")
             show_email_preview(uid, cid)
             return
-        names = ", ".join(CONTACTS[i]["name"] for i in sess["selected"] if i < len(CONTACTS))
+        names_parts = [CONTACTS[i]["name"] for i in sess["selected"] if i < len(CONTACTS)]
+        names_parts += sess.get("custom_recipients", [])
+        names = ", ".join(names_parts)
         photo_paths = []
         selected_photos = sess.get("selected_photos", [])
         if selected_photos:
@@ -755,7 +789,7 @@ def cb_confirm(c):
     elif action == "recipients":
         bot.answer_callback_query(c.id)
         sess["step"] = "recipients"
-        bot.send_message(cid, "Выбери получателей:", reply_markup=kb_recipients(sess["selected"]))
+        bot.send_message(cid, "Выбери получателей:", reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
 
     elif action == "photos":
         bot.answer_callback_query(c.id)
