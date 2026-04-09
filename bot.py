@@ -1,6 +1,8 @@
 import telebot
 import sqlite3
 import smtplib
+import ssl
+import socket
 import re
 import os
 import requests
@@ -17,8 +19,6 @@ TOKEN = os.getenv("BOT_TOKEN", "8630425742:AAHcnb8KBZt8rScUPWGjXde6pyHkjnAO8Sg")
 EMAIL_FROM = "info@parametricbox.com"
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "xhdgjemunutbkmrh")
 SENDER_NAME = "Устина Алёна, руководитель Parametric Box"
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
 DB = "struktura.db"
 PHOTOS_DIR = "photos"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
@@ -243,50 +243,60 @@ def download_photo(file_id):
         return None
 
 def send_email(subject, body, to_list, photo_paths=None):
-    msg = MIMEMultipart()
-    msg["From"] = f"{SENDER_NAME} <{EMAIL_FROM}>"
-    msg["To"] = ", ".join(to_list)
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-    if photo_paths:
-        for i, path in enumerate(photo_paths, 1):
-            if path and os.path.exists(path):
-                with open(path, "rb") as f:
-                    img = MIMEImage(f.read())
-                    img.add_header("Content-Disposition", "attachment",
-                                   filename=f"screenshot_{i}.{path.split('.')[-1]}")
-                    msg.attach(img)
-
-    errors = []
-
-    # Способ 1: SSL порт 465
     try:
-        print(f"Trying SSL port 465...")
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as srv:
-            srv.login(EMAIL_FROM, EMAIL_PASSWORD)
-            srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
-        print("Email sent OK via port 465")
-        return True, None
-    except Exception as e:
-        print(f"Port 465 failed: {e}")
-        errors.append(f"465: {e}")
+        msg = MIMEMultipart()
+        msg["From"] = f"{SENDER_NAME} <{EMAIL_FROM}>"
+        msg["To"] = ", ".join(to_list)
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        if photo_paths:
+            for i, path in enumerate(photo_paths, 1):
+                if path and os.path.exists(path):
+                    with open(path, "rb") as f:
+                        img = MIMEImage(f.read())
+                        img.add_header("Content-Disposition", "attachment",
+                                       filename=f"screenshot_{i}.{path.split('.')[-1]}")
+                        msg.attach(img)
 
-    # Способ 2: STARTTLS порт 587
-    try:
-        print(f"Trying STARTTLS port 587...")
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as srv:
-            srv.ehlo()
-            srv.starttls()
-            srv.ehlo()
-            srv.login(EMAIL_FROM, EMAIL_PASSWORD)
-            srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
-        print("Email sent OK via port 587")
-        return True, None
-    except Exception as e:
-        print(f"Port 587 failed: {e}")
-        errors.append(f"587: {e}")
+        # Принудительно используем IPv4 — Railway иначе пытается IPv6 и получает ошибку
+        try:
+            smtp_ip = socket.getaddrinfo("smtp.gmail.com", None, socket.AF_INET)[0][4][0]
+        except Exception:
+            smtp_ip = "smtp.gmail.com"
 
-    return False, "\n".join(errors)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        errors = []
+
+        # Попытка 1: SSL порт 465
+        try:
+            with smtplib.SMTP_SSL(smtp_ip, 465, timeout=30, context=ctx) as srv:
+                srv.login(EMAIL_FROM, EMAIL_PASSWORD)
+                srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
+            print("Email sent OK via 465")
+            return True, None
+        except Exception as e:
+            errors.append(f"465: {e}")
+
+        # Попытка 2: STARTTLS порт 587
+        try:
+            with smtplib.SMTP(smtp_ip, 587, timeout=30) as srv:
+                srv.ehlo()
+                srv.starttls(context=ctx)
+                srv.ehlo()
+                srv.login(EMAIL_FROM, EMAIL_PASSWORD)
+                srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
+            print("Email sent OK via 587")
+            return True, None
+        except Exception as e:
+            errors.append(f"587: {e}")
+
+        return False, "\n".join(errors)
+
+    except Exception as e:
+        return False, str(e)
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
