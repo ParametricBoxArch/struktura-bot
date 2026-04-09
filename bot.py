@@ -442,7 +442,17 @@ def handle_message(m):
             sess["photos"].append(file_id)
             db_add_photo(uid, file_id)
         count = len(sess["photos"])
-        if step not in (None, "confirm"):
+        if step == "confirm":
+            # Автоматически добавляем к вложениям текущего письма
+            if file_id not in sess.get("selected_photos", []):
+                sess.setdefault("selected_photos", []).append(file_id)
+            sess["email_body"] = None  # пересчитать превью с новым вложением
+            bot.send_message(cid,
+                f"Скриншот добавлен к письму! Всего вложений: {len(sess['selected_photos'])} шт.\n\n"
+                "Выбери действие:",
+                reply_markup=kb_confirm())
+            return
+        elif step not in (None,):
             bot.send_message(cid, f"Скриншот сохранён (всего: {count} шт.)")
             if not text:
                 return
