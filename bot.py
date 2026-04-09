@@ -50,12 +50,18 @@ def init_db():
     with db() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER DEFAULT 0,
             number TEXT, date TEXT, task_name TEXT,
             client_name TEXT, client_tg TEXT,
             duration_label TEXT, duration_detail TEXT,
             hours REAL, rate INTEGER, total INTEGER,
             email_body TEXT, recipients TEXT, status TEXT,
             created_at TEXT)""")
+        # Миграция: добавить user_id если его нет
+        try:
+            c.execute("ALTER TABLE requests ADD COLUMN user_id INTEGER DEFAULT 0")
+        except Exception:
+            pass
         c.execute("""CREATE TABLE IF NOT EXISTS prices (
             category TEXT PRIMARY KEY, rate INTEGER, flat INTEGER)""")
         for cat, p in PRICES_DEFAULT.items():
@@ -96,46 +102,86 @@ def next_number():
                           (f"{today}%",)).fetchone()[0]
         return today if count == 0 else f"{today}-{count + 1}"
 
-def save_draft(user_id, s):
-    with db() as c:
-        c.execute("DELETE FROM requests WHERE status='draft' AND number=?", (s["number"],))
-        c.execute("""INSERT INTO requests
-            (number,date,task_name,client_name,client_tg,duration_label,
-             duration_detail,hours,rate,total,email_body,recipients,status,created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-            s["number"], s["date"], s["task_name"], s["client_name"],
-            s["client_tg"], s.get("duration_label", ""), s.get("duration_detail", ""),
-            s.get("hours"), s.get("rate"), s["total"],
-            s.get("email_body", ""), ",".join(str(i) for i in s.get("selected", [])),
-            "draft", datetime.now().isoformat()))
+def _pack_recipients(sess):
+    parts = [str(i) for i in sess.get("selected", [])]
+    parts += [f"email:{e}" for e in sess.get("custom_recipients", [])]
+    return ",".join(parts)
 
-def save_request(s):
+def _unpack_recipients(recipients_str):
+    selected, custom = [], []
+    for part in recipients_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("email:"):
+            custom.append(part[6:])
+        else:
+            try:
+                selected.append(int(part))
+            except ValueError:
+                pass
+    return selected, custom
+
+def save_draft(user_id, sess):
     with db() as c:
-        c.execute("UPDATE requests SET status='sent' WHERE number=?", (s["number"],))
+        existing = c.execute(
+            "SELECT id FROM requests WHERE status='draft' AND number=? AND user_id=?",
+            (sess["number"], user_id)).fetchone()
+        recipients_str = _pack_recipients(sess)
+        if existing:
+            c.execute("""UPDATE requests SET task_name=?,client_name=?,client_tg=?,
+                duration_label=?,duration_detail=?,hours=?,rate=?,total=?,
+                email_body=?,recipients=?,created_at=? WHERE id=?""", (
+                sess.get("task_name",""), sess.get("client_name",""), sess.get("client_tg",""),
+                sess.get("duration_label",""), sess.get("duration_detail",""),
+                sess.get("hours"), sess.get("rate"), sess.get("total", 0),
+                sess.get("email_body",""), recipients_str,
+                datetime.now().isoformat(), existing[0]))
+        else:
+            c.execute("""INSERT INTO requests
+                (user_id,number,date,task_name,client_name,client_tg,duration_label,
+                 duration_detail,hours,rate,total,email_body,recipients,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                user_id, sess["number"],
+                sess.get("date", datetime.now().strftime("%d.%m.%Y")),
+                sess.get("task_name",""), sess.get("client_name",""), sess.get("client_tg",""),
+                sess.get("duration_label",""), sess.get("duration_detail",""),
+                sess.get("hours"), sess.get("rate"), sess.get("total", 0),
+                sess.get("email_body",""), recipients_str,
+                "draft", datetime.now().isoformat()))
+
+def save_request(sess):
+    with db() as c:
+        c.execute("UPDATE requests SET status='sent' WHERE number=?", (sess["number"],))
         if c.execute("SELECT changes()").fetchone()[0] == 0:
             c.execute("""INSERT INTO requests
                 (number,date,task_name,client_name,client_tg,duration_label,
                  duration_detail,hours,rate,total,email_body,recipients,status,created_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                s["number"], s["date"], s["task_name"], s["client_name"],
-                s["client_tg"], s.get("duration_label", ""), s.get("duration_detail", ""),
-                s.get("hours"), s.get("rate"), s["total"],
-                s.get("email_body", ""), ",".join(str(i) for i in s.get("selected", [])),
-                "sent", datetime.now().isoformat()))
+                sess["number"], sess["date"], sess["task_name"], sess["client_name"],
+                sess["client_tg"], sess.get("duration_label",""), sess.get("duration_detail",""),
+                sess.get("hours"), sess.get("rate"), sess["total"],
+                _pack_recipients(sess), "sent", datetime.now().isoformat()))
 
-def get_draft():
+def get_drafts(user_id):
     with db() as c:
-        row = c.execute("""SELECT number,date,task_name,client_name,client_tg,
+        rows = c.execute("""SELECT id,number,date,task_name,client_name,client_tg,
             duration_label,duration_detail,hours,rate,total,email_body,recipients
-            FROM requests WHERE status='draft' ORDER BY id DESC LIMIT 1""").fetchone()
-        if not row:
-            return None
-        keys = ["number", "date", "task_name", "client_name", "client_tg",
-                "duration_label", "duration_detail", "hours", "rate", "total",
-                "email_body", "recipients"]
-        d = dict(zip(keys, row))
-        d["selected"] = [int(i) for i in d["recipients"].split(",") if i.strip()]
-        return d
+            FROM requests WHERE status='draft' AND user_id=?
+            ORDER BY id DESC""", (user_id,)).fetchall()
+        drafts = []
+        for row in rows:
+            keys = ["id","number","date","task_name","client_name","client_tg",
+                    "duration_label","duration_detail","hours","rate","total",
+                    "email_body","recipients"]
+            d = dict(zip(keys, row))
+            d["selected"], d["custom_recipients"] = _unpack_recipients(d["recipients"])
+            drafts.append(d)
+        return drafts
+
+def get_draft(user_id):
+    drafts = get_drafts(user_id)
+    return drafts[0] if drafts else None
 
 # ── Session helpers ───────────────────────────────────────────────────────────
 
@@ -149,16 +195,20 @@ def ensure_session_restored(uid):
     sess = s(uid)
     if sess.get("number"):
         return True
-    draft = get_draft()
+    draft = get_draft(uid)
     if not draft:
         return False
+    _load_draft_into_session(sess, draft, uid)
+    return True
+
+def _load_draft_into_session(sess, draft, uid):
     sess.update(draft)
     sess["step"] = "confirm"
     sess["is_flat"] = draft.get("rate") is None
     sess["subject"] = f"Заявка №{draft['number']} — {draft['task_name']}"
     sess["photos"] = db_get_photos(uid)
     sess.setdefault("selected_photos", [])
-    return True
+    sess.setdefault("custom_recipients", draft.get("custom_recipients", []))
 
 # ── Cost ─────────────────────────────────────────────────────────────────────
 
@@ -346,8 +396,22 @@ def kb_prices(prices):
 
 def main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.row(types.KeyboardButton("📝 Новая заявка"), types.KeyboardButton("💰 Тарифы"))
-    kb.row(types.KeyboardButton("❓ Помощь"))
+    kb.row(types.KeyboardButton("📝 Новая заявка"), types.KeyboardButton("📋 Черновики"))
+    kb.row(types.KeyboardButton("💰 Тарифы"), types.KeyboardButton("❓ Помощь"))
+    return kb
+
+def kb_drafts(drafts):
+    kb = types.InlineKeyboardMarkup()
+    for d in drafts:
+        task = d["task_name"] or "Без названия"
+        client = d["client_name"] or ""
+        label = f"📄 {task}"
+        if client:
+            label += f" — {client}"
+        label += f"  ({d['date']})"
+        kb.row(
+            types.InlineKeyboardButton(text=label,        callback_data=f"draft_open_{d['id']}"),
+            types.InlineKeyboardButton(text="🗑",         callback_data=f"draft_del_{d['id']}"))
     return kb
 
 # ── Show email preview ────────────────────────────────────────────────────────
@@ -385,25 +449,29 @@ def show_email_preview(uid, cid):
 def cmd_start(m):
     uid = m.from_user.id
     sessions[uid] = {"step": None, "photos": db_get_photos(uid),
-                     "selected_photos": [], "selected": []}
+                     "selected_photos": [], "selected": [], "custom_recipients": []}
     bot.send_message(m.chat.id,
         "Привет, Алёна!\n\n"
         "Я бот управления заявками Parametric Box → Struktura.\n\n"
         "Используй кнопки внизу или меню / слева от поля ввода.",
         reply_markup=main_keyboard())
 
-    draft = get_draft()
-    if draft:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(text="🔄 Продолжить незакрытую заявку", callback_data="draft_resume"))
-        kb.add(types.InlineKeyboardButton(text="🗑 Удалить черновик", callback_data="draft_discard"))
+    drafts = get_drafts(uid)
+    if drafts:
         bot.send_message(m.chat.id,
-            f"У тебя есть незакрытая заявка:\n\n"
-            f"Задача: {draft['task_name']}\n"
-            f"Заказчик: {draft['client_name']}\n"
-            f"Сумма: {fmt(draft['total'])}\n\n"
-            f"Продолжить или удалить?",
-            reply_markup=kb)
+            f"У тебя {len(drafts)} незакрытых заявок — нажми 📋 Черновики чтобы продолжить любую.")
+
+@bot.message_handler(commands=["drafts"])
+@bot.message_handler(func=lambda m: m.text == "📋 Черновики")
+def cmd_drafts(m):
+    uid = m.from_user.id
+    drafts = get_drafts(uid)
+    if not drafts:
+        bot.send_message(m.chat.id, "Нет сохранённых черновиков.")
+        return
+    bot.send_message(m.chat.id,
+        f"Твои черновики ({len(drafts)}):\n\nНажми чтобы продолжить, 🗑 чтобы удалить:",
+        reply_markup=kb_drafts(drafts))
 
 @bot.message_handler(commands=["help"])
 @bot.message_handler(func=lambda m: m.text == "❓ Помощь")
@@ -539,11 +607,13 @@ def handle_message(m):
         sess["total"] = int(nums[0])
         sess["is_flat"] = True
         sess["email_body"] = None
+        save_draft(uid, sess)
         show_email_preview(uid, cid)
         return
 
     if step == "edit_email_text":
         sess["email_body"] = text
+        save_draft(uid, sess)
         bot.send_message(cid, "Текст письма обновлён.")
         show_email_preview(uid, cid)
         return
@@ -594,6 +664,9 @@ def handle_message(m):
 
         sess["number"] = next_number()
         sess["date"] = datetime.now().strftime("%d.%m.%Y")
+
+        # Автосохранение черновика
+        save_draft(uid, sess)
 
         if sess["photos"]:
             sess["step"] = "select_photos"
@@ -715,6 +788,7 @@ def cb_recipients(c):
             return
         bot.answer_callback_query(c.id)
         sess["email_body"] = None
+        save_draft(uid, sess)
         show_email_preview(uid, cid)
         return
     elif action.startswith("del_"):
@@ -833,44 +907,75 @@ def cb_draft(c):
     cid = c.message.chat.id
     bot.answer_callback_query(c.id)
 
-    if action in ("resume", "retry"):
-        draft = get_draft()
+    if action.startswith("open_"):
+        draft_id = int(action.replace("open_", ""))
+        with db() as c:
+            row = c.execute("""SELECT id,number,date,task_name,client_name,client_tg,
+                duration_label,duration_detail,hours,rate,total,email_body,recipients
+                FROM requests WHERE id=? AND status='draft'""", (draft_id,)).fetchone()
+        if not row:
+            bot.send_message(cid, "Черновик не найден.")
+            return
+        keys = ["id","number","date","task_name","client_name","client_tg",
+                "duration_label","duration_detail","hours","rate","total","email_body","recipients"]
+        draft = dict(zip(keys, row))
+        draft["selected"], draft["custom_recipients"] = _unpack_recipients(draft["recipients"])
+        sess = s(uid)
+        _load_draft_into_session(sess, draft, uid)
+        bot.send_message(cid, f"Заявка загружена: {draft['task_name']}")
+        show_email_preview(uid, cid)
+
+    elif action.startswith("del_"):
+        draft_id = int(action.replace("del_", ""))
+        msg_id = c.message.message_id
+        with db() as conn:
+            conn.execute("DELETE FROM requests WHERE id=? AND status='draft'", (draft_id,))
+        drafts = get_drafts(uid)
+        if drafts:
+            try:
+                bot.edit_message_reply_markup(cid, msg_id, reply_markup=kb_drafts(drafts))
+            except Exception:
+                bot.send_message(cid, "Черновик удалён.", reply_markup=kb_drafts(drafts))
+        else:
+            bot.send_message(cid, "Черновик удалён. Черновиков больше нет.")
+
+    elif action in ("resume", "retry"):
+        draft = get_draft(uid)
         if not draft:
             bot.send_message(cid, "Черновик не найден.")
             return
         sess = s(uid)
-        sess.update(draft)
-        sess["step"] = "confirm"
-        sess["is_flat"] = draft.get("rate") is None
-        sess["subject"] = f"Заявка №{draft['number']} — {draft['task_name']}"
-        sess["photos"] = db_get_photos(uid)
-        sess.setdefault("selected_photos", [])
+        _load_draft_into_session(sess, draft, uid)
         if action == "retry":
             to_list = [CONTACTS[i]["email"] for i in sess["selected"] if i < len(CONTACTS)]
+            to_list += sess.get("custom_recipients", [])
             if not to_list:
                 show_email_preview(uid, cid)
                 return
-            names = ", ".join(CONTACTS[i]["name"] for i in sess["selected"] if i < len(CONTACTS))
+            names = ", ".join(
+                [CONTACTS[i]["name"] for i in sess["selected"] if i < len(CONTACTS)] +
+                sess.get("custom_recipients", []))
             body = sess.get("email_body") or build_email(sess)
             sess["email_body"] = body
             bot.send_message(cid, "Отправляю...")
-            ok = send_email(sess["subject"], body, to_list)
+            ok, err = send_email(sess["subject"], body, to_list)
             if ok:
                 save_request(sess)
                 bot.send_message(cid, f"Письмо отправлено!\nПолучатели: {names}\nЗаявка {sess['number']} закрыта.")
-                sessions[uid] = {"step": None, "photos": db_get_photos(uid), "selected_photos": [], "selected": []}
+                sessions[uid] = {"step": None, "photos": db_get_photos(uid),
+                                 "selected_photos": [], "selected": [], "custom_recipients": []}
             else:
-                kb = types.InlineKeyboardMarkup()
-                kb.add(types.InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="draft_retry"))
-                bot.send_message(cid, "Снова ошибка. Попробуй ещё раз:", reply_markup=kb)
+                kb2 = types.InlineKeyboardMarkup()
+                kb2.add(types.InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="draft_retry"))
+                bot.send_message(cid, f"Ошибка: {err}", reply_markup=kb2)
         else:
             bot.send_message(cid, "Заявка восстановлена:")
             show_email_preview(uid, cid)
 
     elif action == "discard":
         with db() as conn:
-            conn.execute("DELETE FROM requests WHERE status='draft'")
-        bot.send_message(cid, "Черновик удалён.")
+            conn.execute("DELETE FROM requests WHERE status='draft' AND user_id=?", (uid,))
+        bot.send_message(cid, "Все черновики удалены.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("editprice_"))
 def cb_editprice(c):
