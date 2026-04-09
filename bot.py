@@ -14,8 +14,9 @@ TOKEN = os.getenv("BOT_TOKEN", "8630425742:AAHcnb8KBZt8rScUPWGjXde6pyHkjnAO8Sg")
 EMAIL_FROM = "info@parametricbox.com"
 SENDER_NAME = "Parametric Box"
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
-DB = os.getenv("DB_PATH", "struktura.db")
-PHOTOS_DIR = os.getenv("PHOTOS_DIR", "photos")
+_data_dir = "/data" if os.path.isdir("/data") else "."
+DB = os.path.join(_data_dir, "struktura.db")
+PHOTOS_DIR = os.path.join(_data_dir, "photos")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 CONTACTS = [
