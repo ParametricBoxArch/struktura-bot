@@ -513,8 +513,20 @@ def cmd_debug(m):
 @bot.message_handler(func=lambda m: m.text == "📝 Новая заявка")
 def cmd_new_request(m):
     uid = m.from_user.id
+    # Сохранить текущую незавершённую заявку как черновик
+    if uid in sessions:
+        old = sessions[uid]
+        if old.get("task_name") and old.get("number"):
+            save_draft(uid, old)
+            bot.send_message(m.chat.id, f"Предыдущая заявка «{old['task_name']}» сохранена в черновиках.")
     all_photos = db_get_photos(uid)
-    sessions[uid] = {"step": "task_name", "selected": [], "photos": all_photos, "selected_photos": []}
+    new_number = next_number()
+    new_date = datetime.now().strftime("%d.%m.%Y")
+    sessions[uid] = {
+        "step": "task_name", "selected": [], "photos": all_photos,
+        "selected_photos": [], "custom_recipients": [],
+        "number": new_number, "date": new_date,
+    }
     bot.send_message(m.chat.id, "Новая заявка\n\nШаг 1/5: Введи название задачи:")
 
 # ── Main message handler ──────────────────────────────────────────────────────
@@ -636,16 +648,19 @@ def handle_message(m):
             return
         sess["task_name"] = text
         sess["step"] = "client_name"
+        save_draft(uid, sess)
         bot.send_message(cid, "Шаг 2/5: Имя заказчика (от кого поступила заявка)?")
 
     elif step == "client_name":
         sess["client_name"] = text
         sess["step"] = "client_tg"
+        save_draft(uid, sess)
         bot.send_message(cid, "Шаг 3/5: Telegram заказчика (например @username):")
 
     elif step == "client_tg":
         sess["client_tg"] = text
         sess["step"] = "category"
+        save_draft(uid, sess)
         prices = get_prices()
         bot.send_message(cid, "Шаг 4/5: Выбери категорию срока:", reply_markup=kb_categories(prices))
 
@@ -662,10 +677,7 @@ def handle_message(m):
                         f"• Часов: {hours:.0f} ч\n• Ставка: {fmt(rate)}/ч\n• Итого: {fmt(total)}")
         bot.send_message(cid, cost_txt)
 
-        sess["number"] = next_number()
-        sess["date"] = datetime.now().strftime("%d.%m.%Y")
-
-        # Автосохранение черновика
+        # Автосохранение черновика (number и date уже заданы при старте)
         save_draft(uid, sess)
 
         if sess["photos"]:
@@ -998,6 +1010,7 @@ if __name__ == "__main__":
     init_db()
     bot.set_my_commands([
         telebot.types.BotCommand("/new_request", "Создать новую заявку"),
+        telebot.types.BotCommand("/drafts",      "Мои черновики"),
         telebot.types.BotCommand("/prices",      "Просмотр и изменение тарифов"),
         telebot.types.BotCommand("/help",        "Помощь"),
     ])
