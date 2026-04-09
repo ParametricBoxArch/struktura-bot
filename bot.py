@@ -243,34 +243,50 @@ def download_photo(file_id):
         return None
 
 def send_email(subject, body, to_list, photo_paths=None):
+    msg = MIMEMultipart()
+    msg["From"] = f"{SENDER_NAME} <{EMAIL_FROM}>"
+    msg["To"] = ", ".join(to_list)
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+    if photo_paths:
+        for i, path in enumerate(photo_paths, 1):
+            if path and os.path.exists(path):
+                with open(path, "rb") as f:
+                    img = MIMEImage(f.read())
+                    img.add_header("Content-Disposition", "attachment",
+                                   filename=f"screenshot_{i}.{path.split('.')[-1]}")
+                    msg.attach(img)
+
+    errors = []
+
+    # Способ 1: SSL порт 465
     try:
-        msg = MIMEMultipart()
-        msg["From"] = f"{SENDER_NAME} <{EMAIL_FROM}>"
-        msg["To"] = ", ".join(to_list)
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-        if photo_paths:
-            for i, path in enumerate(photo_paths, 1):
-                if path and os.path.exists(path):
-                    with open(path, "rb") as f:
-                        img = MIMEImage(f.read())
-                        img.add_header("Content-Disposition", "attachment",
-                                       filename=f"screenshot_{i}.{path.split('.')[-1]}")
-                        msg.attach(img)
-        print(f"Connecting to {SMTP_HOST}:{SMTP_PORT}...")
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
+        print(f"Trying SSL port 465...")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as srv:
+            srv.login(EMAIL_FROM, EMAIL_PASSWORD)
+            srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
+        print("Email sent OK via port 465")
+        return True, None
+    except Exception as e:
+        print(f"Port 465 failed: {e}")
+        errors.append(f"465: {e}")
+
+    # Способ 2: STARTTLS порт 587
+    try:
+        print(f"Trying STARTTLS port 587...")
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as srv:
             srv.ehlo()
             srv.starttls()
             srv.ehlo()
-            print(f"Logging in as {EMAIL_FROM}...")
             srv.login(EMAIL_FROM, EMAIL_PASSWORD)
-            print(f"Sending to {to_list}...")
             srv.sendmail(EMAIL_FROM, to_list, msg.as_bytes())
-        print("Email sent OK")
+        print("Email sent OK via port 587")
         return True, None
     except Exception as e:
-        print(f"Email error: {type(e).__name__}: {e}")
-        return False, f"{type(e).__name__}: {e}"
+        print(f"Port 587 failed: {e}")
+        errors.append(f"587: {e}")
+
+    return False, "\n".join(errors)
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
