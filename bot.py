@@ -1,4 +1,5 @@
 import telebot
+import sqlite3
 import smtplib
 import re
 import os
@@ -9,8 +10,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
 from datetime import datetime
 from dotenv import load_dotenv
-from contextlib import contextmanager
-import psycopg2
 
 load_dotenv()
 
@@ -20,7 +19,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "xhdgjemunutbkmrh")
 SENDER_NAME = "Устина Алёна, руководитель Parametric Box"
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
-DATABASE_URL = os.getenv("DATABASE_URL")
+DB = "struktura.db"
 PHOTOS_DIR = "photos"
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
@@ -48,45 +47,13 @@ sessions = {}
 
 # ── DB ───────────────────────────────────────────────────────────────────────
 
-class _Cur:
-    """Тонкая обёртка над psycopg2 cursor — синтаксис как у sqlite3."""
-    def __init__(self, cur):
-        self._c = cur
-
-    def execute(self, sql, params=()):
-        sql = sql.replace("?", "%s")
-        self._c.execute(sql, params)
-        return self
-
-    def fetchone(self):
-        return self._c.fetchone()
-
-    def fetchall(self):
-        return self._c.fetchall()
-
-    @property
-    def rowcount(self):
-        return self._c.rowcount
-
-
-@contextmanager
 def db():
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = _Cur(conn.cursor())
-    try:
-        yield cur
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
+    return sqlite3.connect(DB)
 
 def init_db():
     with db() as c:
         c.execute("""CREATE TABLE IF NOT EXISTS requests (
-            id SERIAL PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             number TEXT, date TEXT, task_name TEXT,
             client_name TEXT, client_tg TEXT,
             duration_label TEXT, duration_detail TEXT,
@@ -96,14 +63,11 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS prices (
             category TEXT PRIMARY KEY, rate INTEGER, flat INTEGER)""")
         for cat, p in PRICES_DEFAULT.items():
-            c.execute(
-                "INSERT INTO prices (category, rate, flat) VALUES (%s, %s, %s) "
-                "ON CONFLICT (category) DO NOTHING",
-                (cat, p["rate"], p["flat"]))
+            c.execute("INSERT OR IGNORE INTO prices VALUES (?,?,?)",
+                      (cat, p["rate"], p["flat"]))
         c.execute("""CREATE TABLE IF NOT EXISTS user_photos (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT, file_id TEXT, added_at TEXT)""")
-
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER, file_id TEXT, added_at TEXT)""")
 
 def get_prices():
     with db() as c:
@@ -111,39 +75,30 @@ def get_prices():
         return {cat: {"label": PRICES_DEFAULT[cat]["label"], "rate": rate, "flat": flat}
                 for cat, rate, flat in rows}
 
-
 def save_price(cat, rate, flat):
     with db() as c:
         c.execute("UPDATE prices SET rate=?, flat=? WHERE category=?", (rate, flat, cat))
 
-
 def db_add_photo(user_id, file_id):
     with db() as c:
-        exists = c.execute(
-            "SELECT 1 FROM user_photos WHERE user_id=? AND file_id=?",
-            (user_id, file_id)).fetchone()
+        exists = c.execute("SELECT 1 FROM user_photos WHERE user_id=? AND file_id=?",
+                           (user_id, file_id)).fetchone()
         if not exists:
-            c.execute(
-                "INSERT INTO user_photos (user_id, file_id, added_at) VALUES (?,?,?)",
-                (user_id, file_id, datetime.now().isoformat()))
-
+            c.execute("INSERT INTO user_photos (user_id, file_id, added_at) VALUES (?,?,?)",
+                      (user_id, file_id, datetime.now().isoformat()))
 
 def db_get_photos(user_id):
     with db() as c:
-        rows = c.execute(
-            "SELECT file_id FROM user_photos WHERE user_id=? ORDER BY id",
-            (user_id,)).fetchall()
+        rows = c.execute("SELECT file_id FROM user_photos WHERE user_id=? ORDER BY id",
+                         (user_id,)).fetchall()
         return [r[0] for r in rows]
-
 
 def next_number():
     today = datetime.now().strftime("%d%m%Y")
     with db() as c:
-        count = c.execute(
-            "SELECT COUNT(*) FROM requests WHERE number LIKE ?",
-            (f"{today}%",)).fetchone()[0]
+        count = c.execute("SELECT COUNT(*) FROM requests WHERE number LIKE ?",
+                          (f"{today}%",)).fetchone()[0]
         return today if count == 0 else f"{today}-{count + 1}"
-
 
 def save_draft(user_id, s):
     with db() as c:
@@ -158,11 +113,10 @@ def save_draft(user_id, s):
             s.get("email_body", ""), ",".join(str(i) for i in s.get("selected", [])),
             "draft", datetime.now().isoformat()))
 
-
 def save_request(s):
     with db() as c:
         c.execute("UPDATE requests SET status='sent' WHERE number=?", (s["number"],))
-        if c.rowcount == 0:
+        if c.execute("SELECT changes()").fetchone()[0] == 0:
             c.execute("""INSERT INTO requests
                 (number,date,task_name,client_name,client_tg,duration_label,
                  duration_detail,hours,rate,total,email_body,recipients,status,created_at)
@@ -172,7 +126,6 @@ def save_request(s):
                 s.get("hours"), s.get("rate"), s["total"],
                 s.get("email_body", ""), ",".join(str(i) for i in s.get("selected", [])),
                 "sent", datetime.now().isoformat()))
-
 
 def get_draft():
     with db() as c:
@@ -195,7 +148,6 @@ def s(uid):
         sessions[uid] = {"step": None, "photos": db_get_photos(uid),
                          "selected_photos": [], "selected": []}
     return sessions[uid]
-
 
 def ensure_session_restored(uid):
     sess = s(uid)
@@ -229,10 +181,8 @@ def calc_cost(cat, detail, prices):
     elif cat == "months":
         return None, None, round(num * p["flat"]), True, p["label"]
 
-
 def fmt(n):
     return f"{int(n):,}".replace(",", " ") + " руб."
-
 
 def pluralize_days(n):
     if 11 <= n % 100 <= 19:
@@ -241,7 +191,6 @@ def pluralize_days(n):
     if r == 1:   return "день"
     if r <= 4:   return "дня"
     return "дней"
-
 
 def format_duration(detail):
     time_words = ["день", "дня", "дней", "недел", "месяц", "час"]
@@ -278,7 +227,6 @@ def build_email(s):
         f"руководитель Parametric Box"
     )
 
-
 def download_photo(file_id):
     try:
         file_info = bot.get_file(file_id)
@@ -293,7 +241,6 @@ def download_photo(file_id):
     except Exception as e:
         print("Photo download error:", e)
         return None
-
 
 def send_email(subject, body, to_list, photo_paths=None):
     try:
@@ -335,7 +282,6 @@ def kb_categories(prices):
     kb.add(types.InlineKeyboardButton(text="← Назад", callback_data="back_client_tg"))
     return kb
 
-
 def kb_recipients(selected):
     kb = types.InlineKeyboardMarkup()
     for i, c in enumerate(CONTACTS):
@@ -350,7 +296,6 @@ def kb_recipients(selected):
         types.InlineKeyboardButton(text="← Назад",             callback_data="back_photos"),
         types.InlineKeyboardButton(text="➡️ Показать письмо",  callback_data="rcpt_done"))
     return kb
-
 
 def kb_photos(all_ids, selected_ids):
     kb = types.InlineKeyboardMarkup()
@@ -367,7 +312,6 @@ def kb_photos(all_ids, selected_ids):
         types.InlineKeyboardButton(text="➡️ К получателям", callback_data="photo_done"))
     return kb
 
-
 def kb_confirm():
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton(text="✅ Подтвердить и отправить",  callback_data="confirm_send"))
@@ -378,7 +322,6 @@ def kb_confirm():
     kb.add(types.InlineKeyboardButton(text="❌ Отмена",                   callback_data="confirm_cancel"))
     return kb
 
-
 def kb_prices(prices):
     kb = types.InlineKeyboardMarkup()
     for cat, p in prices.items():
@@ -387,7 +330,6 @@ def kb_prices(prices):
         kb.add(types.InlineKeyboardButton(
             text=f"✏️ {p['label']}: {val}", callback_data=f"editprice_{cat}"))
     return kb
-
 
 def main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -447,7 +389,6 @@ def cmd_start(m):
             f"Продолжить или удалить?",
             reply_markup=kb)
 
-
 @bot.message_handler(commands=["help"])
 @bot.message_handler(func=lambda m: m.text == "❓ Помощь")
 def cmd_help(m):
@@ -462,7 +403,6 @@ def cmd_help(m):
         "7. Подтвердишь — письмо уйдёт с вложениями\n\n"
         "Если на этапе подтверждения захочешь добавить скриншот — просто пришли его боту.")
 
-
 @bot.message_handler(commands=["prices"])
 @bot.message_handler(func=lambda m: m.text == "💰 Тарифы")
 def cmd_prices(m):
@@ -475,7 +415,6 @@ def cmd_prices(m):
     bot.send_message(m.chat.id,
         "Текущие тарифы:\n\n" + "\n".join(lines) + "\n\nНажми чтобы изменить:",
         reply_markup=kb_prices(prices))
-
 
 @bot.message_handler(commands=["new_request"])
 @bot.message_handler(func=lambda m: m.text == "📝 Новая заявка")
@@ -503,10 +442,9 @@ def handle_message(m):
         count = len(sess["photos"])
 
         if step == "confirm":
-            # Добавляем к вложениям текущего письма
             if file_id not in sess.get("selected_photos", []):
                 sess.setdefault("selected_photos", []).append(file_id)
-            sess["email_body"] = None  # пересчитать с новым вложением
+            sess["email_body"] = None
             bot.send_message(cid,
                 f"Скриншот добавлен к письму! Всего вложений: {len(sess['selected_photos'])} шт.\n\n"
                 "Выбери действие:",
@@ -602,18 +540,15 @@ def handle_message(m):
             bot.send_message(cid, "Шаг 5/5: Выбери получателей письма:",
                              reply_markup=kb_recipients(sess["selected"]))
 
-
 def _show_photo_selection(uid, cid):
     sess = s(uid)
     all_ids = sess["photos"]
     selected = sess["selected_photos"]
-
     for i, fid in enumerate(all_ids, 1):
         try:
             bot.send_photo(cid, fid, caption=f"Скриншот {i}")
         except Exception:
             pass
-
     bot.send_message(cid,
         f"Шаг 5а: У тебя {len(all_ids)} скриншот(ов).\n"
         "Выбери какие прикрепить к письму:",
@@ -628,7 +563,6 @@ def cb_back(c):
     cid = c.message.chat.id
     target = c.data.replace("back_", "")
     bot.answer_callback_query(c.id)
-
     if target == "client_tg":
         sess["step"] = "client_tg"
         bot.send_message(cid, "← Назад\n\nTelegram заказчика (например @username):")
@@ -644,7 +578,6 @@ def cb_back(c):
             sess["step"] = "category"
             prices = get_prices()
             bot.send_message(cid, "← Назад\n\nВыбери категорию срока:", reply_markup=kb_categories(prices))
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cat_"))
 def cb_category(c):
@@ -662,7 +595,6 @@ def cb_category(c):
     bot.answer_callback_query(c.id)
     bot.send_message(c.message.chat.id, prompts[cat])
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("photo_"))
 def cb_photos(c):
     uid = c.from_user.id
@@ -671,7 +603,6 @@ def cb_photos(c):
     cid = c.message.chat.id
     all_ids = sess["photos"]
     selected = sess.get("selected_photos", [])
-
     if action == "all":
         sess["selected_photos"] = list(all_ids)
     elif action == "none":
@@ -692,11 +623,9 @@ def cb_photos(c):
         else:
             selected.append(fid)
         sess["selected_photos"] = selected
-
     bot.answer_callback_query(c.id)
     bot.edit_message_reply_markup(cid, c.message.message_id,
                                   reply_markup=kb_photos(all_ids, sess["selected_photos"]))
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("rcpt_"))
 def cb_recipients(c):
@@ -704,7 +633,6 @@ def cb_recipients(c):
     sess = s(uid)
     action = c.data.replace("rcpt_", "")
     cid = c.message.chat.id
-
     if action == "all":
         sess["selected"] = list(range(len(CONTACTS)))
     elif action == "none":
@@ -723,11 +651,9 @@ def cb_recipients(c):
             sess["selected"].remove(idx)
         else:
             sess["selected"].append(idx)
-
     bot.answer_callback_query(c.id)
     bot.edit_message_reply_markup(cid, c.message.message_id,
                                   reply_markup=kb_recipients(sess["selected"]))
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_"))
 def cb_confirm(c):
@@ -759,14 +685,11 @@ def cb_confirm(c):
                 path = download_photo(fid)
                 if path:
                     photo_paths.append(path)
-
         save_draft(uid, sess)
-
         subject = sess.get("subject") or f"Заявка №{sess['number']} — {sess['task_name']}"
         sess["subject"] = subject
         body = sess.get("email_body") or build_email(sess)
         sess["email_body"] = body
-
         bot.send_message(cid, "Отправляю письмо...")
         ok = send_email(subject, body, to_list, photo_paths)
         if ok:
@@ -775,8 +698,7 @@ def cb_confirm(c):
             bot.send_message(cid,
                 f"Письмо отправлено{attach_info}!\n\n"
                 f"Получатели: {names}\n"
-                f"Заявка {sess['number']} закрыта.\n\n"
-                f"Следующие сообщения — новый контекст.")
+                f"Заявка {sess['number']} закрыта.")
             sessions[uid] = {"step": None, "photos": db_get_photos(uid),
                              "selected_photos": [], "selected": []}
         else:
@@ -784,8 +706,7 @@ def cb_confirm(c):
             kb.add(types.InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="draft_retry"))
             kb.add(types.InlineKeyboardButton(text="✏️ Вернуться к письму", callback_data="draft_resume"))
             bot.send_message(cid,
-                "Ошибка отправки письма.\n\n"
-                "Данные заявки сохранены — можешь попробовать снова:",
+                "Ошибка отправки письма. Данные сохранены — попробуй снова:",
                 reply_markup=kb)
             sess["step"] = "confirm"
 
@@ -824,7 +745,6 @@ def cb_confirm(c):
                          "selected_photos": [], "selected": []}
         bot.send_message(cid, "Заявка отменена.")
 
-
 @bot.callback_query_handler(func=lambda c: c.data.startswith("draft_"))
 def cb_draft(c):
     uid = c.from_user.id
@@ -844,11 +764,9 @@ def cb_draft(c):
         sess["subject"] = f"Заявка №{draft['number']} — {draft['task_name']}"
         sess["photos"] = db_get_photos(uid)
         sess.setdefault("selected_photos", [])
-
         if action == "retry":
             to_list = [CONTACTS[i]["email"] for i in sess["selected"] if i < len(CONTACTS)]
             if not to_list:
-                bot.send_message(cid, "Нет получателей. Восстанавливаю письмо:")
                 show_email_preview(uid, cid)
                 return
             names = ", ".join(CONTACTS[i]["name"] for i in sess["selected"] if i < len(CONTACTS))
@@ -858,11 +776,8 @@ def cb_draft(c):
             ok = send_email(sess["subject"], body, to_list)
             if ok:
                 save_request(sess)
-                bot.send_message(cid,
-                    f"Письмо отправлено!\n\nПолучатели: {names}\n"
-                    f"Заявка {sess['number']} закрыта.")
-                sessions[uid] = {"step": None, "photos": db_get_photos(uid),
-                                 "selected_photos": [], "selected": []}
+                bot.send_message(cid, f"Письмо отправлено!\nПолучатели: {names}\nЗаявка {sess['number']} закрыта.")
+                sessions[uid] = {"step": None, "photos": db_get_photos(uid), "selected_photos": [], "selected": []}
             else:
                 kb = types.InlineKeyboardMarkup()
                 kb.add(types.InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="draft_retry"))
@@ -872,10 +787,9 @@ def cb_draft(c):
             show_email_preview(uid, cid)
 
     elif action == "discard":
-        with db() as c:
-            c.execute("DELETE FROM requests WHERE status='draft'")
+        with db() as conn:
+            conn.execute("DELETE FROM requests WHERE status='draft'")
         bot.send_message(cid, "Черновик удалён.")
-
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("editprice_"))
 def cb_editprice(c):
