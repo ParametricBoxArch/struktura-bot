@@ -20,15 +20,8 @@ PHOTOS_DIR = os.path.join(_data_dir, "photos")
 os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 CONTACTS = [
-    {"name": "Лера (тест)",          "title": "Тестовый получатель",       "email": "leraduv@gmail.com"},
-    {"name": "Степаненко Андрей",    "title": "Директор проектов",          "email": "andrey.stepanenko@sk-struktura.ru"},
-    {"name": "Апанасевич Алексей",   "title": "Руководитель проекта",       "email": "apanasevich@sk-struktura.ru"},
-    {"name": "Макарова Надежда",     "title": "Администратор проекта",      "email": "makarova@sk-struktura.ru"},
-    {"name": "Василькив Алена",      "title": "Главный архитектор",         "email": "vasilkiv@sk-struktura.ru"},
-    {"name": "Сайтфутдинов Динар",  "title": "Рук. BIM отдела",            "email": "d.sayfutdinov@sk-struktura.ru"},
-    {"name": "Маняпов Исламнур",     "title": "BIM менеджер",               "email": "manyapov@sk-struktura.ru"},
-    {"name": "Потапенко Артём",      "title": "Главный конструктор",        "email": "a.potapenko@sk-struktura.ru"},
-    {"name": "Тарасевич Екатерина", "title": "Рук. СДО",                   "email": "tarasevich@sk-struktura.ru"},
+    {"name": "Степаненко Андрей",  "title": "Директор проектов",    "email": "andrey.stepanenko@sk-struktura.ru"},
+    {"name": "Апанасевич Алексей", "title": "Руководитель проекта", "email": "apanasevich@sk-struktura.ru"},
 ]
 
 PRICES_DEFAULT = {
@@ -51,17 +44,21 @@ def init_db():
         c.execute("""CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER DEFAULT 0,
-            number TEXT, date TEXT, task_name TEXT,
+            number TEXT, date TEXT, task_name TEXT, task_description TEXT,
             client_name TEXT, client_tg TEXT,
             duration_label TEXT, duration_detail TEXT,
             hours REAL, rate INTEGER, total INTEGER,
             email_body TEXT, recipients TEXT, status TEXT,
             created_at TEXT)""")
-        # Миграция: добавить user_id если его нет
-        try:
-            c.execute("ALTER TABLE requests ADD COLUMN user_id INTEGER DEFAULT 0")
-        except Exception:
-            pass
+        # Миграции
+        for col, typedef in [
+            ("user_id", "INTEGER DEFAULT 0"),
+            ("task_description", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                c.execute(f"ALTER TABLE requests ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass
         c.execute("""CREATE TABLE IF NOT EXISTS prices (
             category TEXT PRIMARY KEY, rate INTEGER, flat INTEGER)""")
         for cat, p in PRICES_DEFAULT.items():
@@ -109,7 +106,7 @@ def _pack_recipients(sess):
 
 def _unpack_recipients(recipients_str):
     selected, custom = [], []
-    for part in recipients_str.split(","):
+    for part in (recipients_str or "").split(","):
         part = part.strip()
         if not part:
             continue
@@ -129,25 +126,27 @@ def save_draft(user_id, sess):
             (sess["number"], user_id)).fetchone()
         recipients_str = _pack_recipients(sess)
         if existing:
-            c.execute("""UPDATE requests SET task_name=?,client_name=?,client_tg=?,
+            c.execute("""UPDATE requests SET task_name=?,task_description=?,client_name=?,client_tg=?,
                 duration_label=?,duration_detail=?,hours=?,rate=?,total=?,
                 email_body=?,recipients=?,created_at=? WHERE id=?""", (
-                sess.get("task_name",""), sess.get("client_name",""), sess.get("client_tg",""),
-                sess.get("duration_label",""), sess.get("duration_detail",""),
+                sess.get("task_name", ""), sess.get("task_description", ""),
+                sess.get("client_name", ""), sess.get("client_tg", ""),
+                sess.get("duration_label", ""), sess.get("duration_detail", ""),
                 sess.get("hours"), sess.get("rate"), sess.get("total", 0),
-                sess.get("email_body",""), recipients_str,
+                sess.get("email_body", ""), recipients_str,
                 datetime.now().isoformat(), existing[0]))
         else:
             c.execute("""INSERT INTO requests
-                (user_id,number,date,task_name,client_name,client_tg,duration_label,
-                 duration_detail,hours,rate,total,email_body,recipients,status,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                (user_id,number,date,task_name,task_description,client_name,client_tg,
+                 duration_label,duration_detail,hours,rate,total,email_body,recipients,status,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 user_id, sess["number"],
                 sess.get("date", datetime.now().strftime("%d.%m.%Y")),
-                sess.get("task_name",""), sess.get("client_name",""), sess.get("client_tg",""),
-                sess.get("duration_label",""), sess.get("duration_detail",""),
+                sess.get("task_name", ""), sess.get("task_description", ""),
+                sess.get("client_name", ""), sess.get("client_tg", ""),
+                sess.get("duration_label", ""), sess.get("duration_detail", ""),
                 sess.get("hours"), sess.get("rate"), sess.get("total", 0),
-                sess.get("email_body",""), recipients_str,
+                sess.get("email_body", ""), recipients_str,
                 "draft", datetime.now().isoformat()))
 
 def save_request(sess):
@@ -155,25 +154,24 @@ def save_request(sess):
         c.execute("UPDATE requests SET status='sent' WHERE number=?", (sess["number"],))
         if c.execute("SELECT changes()").fetchone()[0] == 0:
             c.execute("""INSERT INTO requests
-                (number,date,task_name,client_name,client_tg,duration_label,
+                (number,date,task_name,task_description,client_name,client_tg,duration_label,
                  duration_detail,hours,rate,total,email_body,recipients,status,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                sess["number"], sess["date"], sess["task_name"], sess["client_name"],
-                sess["client_tg"], sess.get("duration_label",""), sess.get("duration_detail",""),
-                sess.get("hours"), sess.get("rate"), sess["total"],
-                _pack_recipients(sess), "sent", datetime.now().isoformat()))
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                sess["number"], sess["date"], sess["task_name"], sess.get("task_description",""),
+                sess["client_name"], sess["client_tg"], sess.get("duration_label",""),
+                sess.get("duration_detail",""), sess.get("hours"), sess.get("rate"), sess["total"],
+                sess.get("email_body",""), _pack_recipients(sess), "sent", datetime.now().isoformat()))
 
 def get_drafts(user_id):
     with db() as c:
-        rows = c.execute("""SELECT id,number,date,task_name,client_name,client_tg,
+        rows = c.execute("""SELECT id,number,date,task_name,task_description,client_name,client_tg,
             duration_label,duration_detail,hours,rate,total,email_body,recipients
             FROM requests WHERE status='draft' AND user_id=?
             ORDER BY id DESC""", (user_id,)).fetchall()
         drafts = []
         for row in rows:
-            keys = ["id","number","date","task_name","client_name","client_tg",
-                    "duration_label","duration_detail","hours","rate","total",
-                    "email_body","recipients"]
+            keys = ["id","number","date","task_name","task_description","client_name","client_tg",
+                    "duration_label","duration_detail","hours","rate","total","email_body","recipients"]
             d = dict(zip(keys, row))
             d["selected"], d["custom_recipients"] = _unpack_recipients(d["recipients"])
             drafts.append(d)
@@ -188,7 +186,7 @@ def get_draft(user_id):
 def s(uid):
     if uid not in sessions:
         sessions[uid] = {"step": None, "photos": db_get_photos(uid),
-                         "selected_photos": [], "selected": []}
+                         "selected_photos": [], "selected": [], "custom_recipients": []}
     return sessions[uid]
 
 def ensure_session_restored(uid):
@@ -209,23 +207,58 @@ def _load_draft_into_session(sess, draft, uid):
     sess["photos"] = db_get_photos(uid)
     sess.setdefault("selected_photos", [])
     sess.setdefault("custom_recipients", draft.get("custom_recipients", []))
+    sess.setdefault("task_description", draft.get("task_description", ""))
 
 # ── Cost ─────────────────────────────────────────────────────────────────────
 
-def calc_cost(cat, detail, prices):
-    p = prices[cat]
-    nums = re.findall(r'\d+(?:[.,]\d+)?', detail)
-    num = float(nums[0].replace(",", ".")) if nums else 1.0
-    if cat == "week":
-        h = num * 8
-        return h, p["rate"], round(h * p["rate"]), False, p["label"]
-    elif cat == "weeks":
-        h = num * 5 * 8
-        return h, p["rate"], round(h * p["rate"]), False, p["label"]
-    elif cat == "month":
-        return None, None, p["flat"], True, p["label"]
-    elif cat == "months":
-        return None, None, round(num * p["flat"]), True, p["label"]
+def parse_duration(text, prices):
+    """
+    Разбирает свободный ввод типа '8 часов', '2 дня', '3 недели', '1 месяц'.
+    Возвращает (hours, rate, total, is_flat, label) или все None при ошибке.
+    Правила:
+      - часы → 8 000 р/ч (тариф 'week')
+      - дни < 5 рабочих дней → 8 000 р/ч; дни >= 5 → 5 000 р/ч (тариф 'weeks')
+      - недели → 5 000 р/ч (тариф 'weeks')
+      - месяцы → фиксированная ставка (тариф 'month'/'months')
+    """
+    tl = text.lower().strip()
+    nums = re.findall(r'\d+(?:[.,]\d+)?', tl)
+    n = float(nums[0].replace(",", ".")) if nums else 1.0
+
+    if "час" in tl:
+        h = n
+        rate = prices["week"]["rate"]
+        total = round(h * rate)
+        label = f"{n:.0f} ч"
+        return h, rate, total, False, label
+
+    elif any(w in tl for w in ["день", "дня", "дней", "дн."]):
+        h = n * 8
+        if h < 40:  # меньше 5 рабочих дней = меньше недели
+            rate = prices["week"]["rate"]
+        else:
+            rate = prices["weeks"]["rate"]
+        total = round(h * rate)
+        label = f"{n:.0f} дн."
+        return h, rate, total, False, label
+
+    elif "недел" in tl:
+        h = n * 5 * 8  # 5 рабочих дней × 8 часов
+        rate = prices["weeks"]["rate"]
+        total = round(h * rate)
+        label = f"{n:.0f} нед."
+        return h, rate, total, False, label
+
+    elif "месяц" in tl or "мес." in tl:
+        if n <= 1:
+            total = prices["month"]["flat"]
+        else:
+            total = round(n * prices["months"]["flat"])
+        label = f"{n:.0f} мес."
+        return None, None, total, True, label
+
+    else:
+        return None, None, None, None, None
 
 def fmt(n):
     return f"{int(n):,}".replace(",", " ") + " руб."
@@ -252,6 +285,9 @@ def format_duration(detail):
 
 def build_email(s):
     duration_line = f"{format_duration(s['duration_detail'])} (от даты подписания доп.соглашения)"
+    desc_block = ""
+    if s.get("task_description"):
+        desc_block = f"  - Описание задачи: {s['task_description']}\n"
     return (
         f"Уважаемые коллеги,\n\n"
         f"настоящим уведомляем вас о поступлении новой заявки на выполнение работ.\n\n"
@@ -260,6 +296,7 @@ def build_email(s):
         f"  - Номер запроса: {s['number']}\n"
         f"  - Дата поступления: {s['date']}\n"
         f"  - Название задачи: {s['task_name']}\n"
+        f"{desc_block}"
         f"  - Заказчик: {s['client_name']}\n"
         f"  - Telegram: {s['client_tg']}\n\n"
         f"СТОИМОСТЬ РАБОТ\n"
@@ -326,18 +363,6 @@ def send_email(subject, body, to_list, photo_paths=None):
         return False, str(e)
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
-
-def kb_categories(prices):
-    kb = types.InlineKeyboardMarkup()
-    icons = {"week": "⚡", "weeks": "📅", "month": "🗓", "months": "📦"}
-    for cat, p in prices.items():
-        rate_str = (f"{p['rate']:,} р/ч".replace(",", " ") if p["rate"]
-                    else f"{p['flat']:,} р фикс.".replace(",", " "))
-        kb.add(types.InlineKeyboardButton(
-            text=f"{icons[cat]} {p['label']}  ({rate_str})",
-            callback_data=f"cat_{cat}"))
-    kb.add(types.InlineKeyboardButton(text="← Назад", callback_data="back_client_tg"))
-    return kb
 
 def kb_recipients(selected, custom_recipients=None):
     kb = types.InlineKeyboardMarkup()
@@ -480,11 +505,12 @@ def cmd_help(m):
         "Как пользоваться:\n\n"
         "1. Присылай сообщения и скриншоты — бот их запоминает\n"
         "2. /new_request — начать оформление заявки\n"
-        "3. Бот спросит данные, рассчитает стоимость\n"
-        "4. Выберешь какие скриншоты приложить к письму\n"
-        "5. Выберешь получателей из Struktura\n"
-        "6. Увидишь черновик — можно редактировать текст, стоимость, получателей\n"
-        "7. Подтвердишь — письмо уйдёт с вложениями\n\n"
+        "3. Бот спросит данные (название, описание, заказчик, срок)\n"
+        "4. Срок пиши так: 8 часов / 2 дня / 3 недели / 1 месяц\n"
+        "5. Выберешь какие скриншоты приложить к письму\n"
+        "6. Выберешь получателей\n"
+        "7. Увидишь черновик — можно редактировать текст, стоимость, получателей\n"
+        "8. Подтвердишь — письмо уйдёт с вложениями\n\n"
         "Если на этапе подтверждения захочешь добавить скриншот — просто пришли его боту.")
 
 @bot.message_handler(commands=["prices"])
@@ -526,6 +552,7 @@ def cmd_new_request(m):
         "step": "task_name", "selected": [], "photos": all_photos,
         "selected_photos": [], "custom_recipients": [],
         "number": new_number, "date": new_date,
+        "task_description": "",
     }
     bot.send_message(m.chat.id, "Новая заявка\n\nШаг 1/5: Введи название задачи:")
 
@@ -563,7 +590,6 @@ def handle_message(m):
         return
 
     if m.document:
-        # Не изображение — игнорируем
         return
 
     if m.photo:
@@ -647,37 +673,60 @@ def handle_message(m):
             bot.send_message(cid, "Введи название задачи текстом:")
             return
         sess["task_name"] = text
+        sess["step"] = "task_description"
+        save_draft(uid, sess)
+        bot.send_message(cid, "Шаг 2/5: Введи описание задачи (кратко, что нужно сделать):")
+
+    elif step == "task_description":
+        sess["task_description"] = text
         sess["step"] = "client_name"
         save_draft(uid, sess)
-        bot.send_message(cid, "Шаг 2/5: Имя заказчика (от кого поступила заявка)?")
+        bot.send_message(cid, "Шаг 3/5: Имя заказчика (от кого поступила заявка)?")
 
     elif step == "client_name":
         sess["client_name"] = text
         sess["step"] = "client_tg"
         save_draft(uid, sess)
-        bot.send_message(cid, "Шаг 3/5: Telegram заказчика (например @username):")
+        bot.send_message(cid, "Шаг 4/5: Telegram заказчика (например @username):")
 
     elif step == "client_tg":
         sess["client_tg"] = text
-        sess["step"] = "category"
+        sess["step"] = "duration"
         save_draft(uid, sess)
         prices = get_prices()
-        bot.send_message(cid, "Шаг 4/5: Выбери категорию срока:", reply_markup=kb_categories(prices))
+        rates_info = "\n".join([
+            f"  • {p['label']}: {p['rate']:,} р/ч".replace(",", " ") if p["rate"]
+            else f"  • {p['label']}: {p['flat']:,} р фикс.".replace(",", " ")
+            for p in prices.values()
+        ])
+        bot.send_message(cid,
+            "Шаг 5/5: Введи срок выполнения.\n\n"
+            "Примеры: 8 часов / 2 дня / 3 недели / 1 месяц\n\n"
+            "Действующие ставки:\n" + rates_info)
 
-    elif step == "duration_detail":
-        sess["duration_detail"] = text
+    elif step == "duration":
         prices = get_prices()
-        hours, rate, total, is_flat, label = calc_cost(sess["category"], text, prices)
+        hours, rate, total, is_flat, label = parse_duration(text, prices)
+
+        if total is None:
+            bot.send_message(cid,
+                "Не удалось распознать срок. Напиши так:\n"
+                "  • 8 часов\n"
+                "  • 2 дня\n"
+                "  • 3 недели\n"
+                "  • 1 месяц")
+            return
+
+        sess["duration_detail"] = text
         sess.update(hours=hours, rate=rate, total=total, is_flat=is_flat, duration_label=label)
 
         if is_flat:
-            cost_txt = f"Расчёт:\n• {label}\n• Срок: {text}\n• Итого: {fmt(total)}"
+            cost_txt = f"Расчёт:\n• Срок: {text}\n• Итого: {fmt(total)}"
         else:
-            cost_txt = (f"Расчёт:\n• {label}\n• Срок: {text}\n"
+            cost_txt = (f"Расчёт:\n• Срок: {text}\n"
                         f"• Часов: {hours:.0f} ч\n• Ставка: {fmt(rate)}/ч\n• Итого: {fmt(total)}")
         bot.send_message(cid, cost_txt)
 
-        # Автосохранение черновика (number и date уже заданы при старте)
         save_draft(uid, sess)
 
         if sess["photos"]:
@@ -686,7 +735,7 @@ def handle_message(m):
             _show_photo_selection(uid, cid)
         else:
             sess["step"] = "recipients"
-            bot.send_message(cid, "Шаг 5/5: Выбери получателей письма:",
+            bot.send_message(cid, "Выбери получателей письма:",
                              reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
 
 def _show_photo_selection(uid, cid):
@@ -702,7 +751,7 @@ def _show_photo_selection(uid, cid):
             except Exception:
                 pass
     bot.send_message(cid,
-        f"Шаг 5а: У тебя {len(all_ids)} скриншот(ов).\n"
+        f"У тебя {len(all_ids)} скриншот(ов).\n"
         "Выбери какие прикрепить к письму:",
         reply_markup=kb_photos(all_ids, selected))
 
@@ -715,37 +764,20 @@ def cb_back(c):
     cid = c.message.chat.id
     target = c.data.replace("back_", "")
     bot.answer_callback_query(c.id)
-    if target == "client_tg":
-        sess["step"] = "client_tg"
-        bot.send_message(cid, "← Назад\n\nTelegram заказчика (например @username):")
-    elif target == "duration":
-        sess["step"] = "category"
-        prices = get_prices()
-        bot.send_message(cid, "← Назад\n\nВыбери категорию срока:", reply_markup=kb_categories(prices))
+    if target == "duration":
+        sess["step"] = "duration"
+        bot.send_message(cid,
+            "← Назад\n\nВведи срок выполнения:\n"
+            "  • 8 часов\n  • 2 дня\n  • 3 недели\n  • 1 месяц")
     elif target == "photos":
         if sess["photos"]:
             sess["step"] = "select_photos"
             _show_photo_selection(uid, cid)
         else:
-            sess["step"] = "category"
-            prices = get_prices()
-            bot.send_message(cid, "← Назад\n\nВыбери категорию срока:", reply_markup=kb_categories(prices))
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("cat_"))
-def cb_category(c):
-    uid = c.from_user.id
-    sess = s(uid)
-    cat = c.data.replace("cat_", "")
-    sess["category"] = cat
-    sess["step"] = "duration_detail"
-    prompts = {
-        "week":   "Укажи срок (например: 3 дня, 5 дней):",
-        "weeks":  "Укажи срок (например: 2 недели, 3 недели):",
-        "month":  "Уточни срок (например: 1 месяц):",
-        "months": "Укажи количество месяцев (например: 2 месяца):",
-    }
-    bot.answer_callback_query(c.id)
-    bot.send_message(c.message.chat.id, prompts[cat])
+            sess["step"] = "duration"
+            bot.send_message(cid,
+                "← Назад\n\nВведи срок выполнения:\n"
+                "  • 8 часов\n  • 2 дня\n  • 3 недели\n  • 1 месяц")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("photo_"))
 def cb_photos(c):
@@ -867,7 +899,7 @@ def cb_confirm(c):
                 f"Получатели: {names}\n"
                 f"Заявка {sess['number']} закрыта.")
             sessions[uid] = {"step": None, "photos": db_get_photos(uid),
-                             "selected_photos": [], "selected": []}
+                             "selected_photos": [], "selected": [], "custom_recipients": []}
         else:
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="draft_retry"))
@@ -892,7 +924,8 @@ def cb_confirm(c):
     elif action == "recipients":
         bot.answer_callback_query(c.id)
         sess["step"] = "recipients"
-        bot.send_message(cid, "Выбери получателей:", reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
+        bot.send_message(cid, "Выбери получателей:",
+                         reply_markup=kb_recipients(sess["selected"], sess.get("custom_recipients", [])))
 
     elif action == "photos":
         bot.answer_callback_query(c.id)
@@ -909,7 +942,7 @@ def cb_confirm(c):
     elif action == "cancel":
         bot.answer_callback_query(c.id)
         sessions[uid] = {"step": None, "photos": db_get_photos(uid),
-                         "selected_photos": [], "selected": []}
+                         "selected_photos": [], "selected": [], "custom_recipients": []}
         bot.send_message(cid, "Заявка отменена.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("draft_"))
@@ -921,14 +954,14 @@ def cb_draft(c):
 
     if action.startswith("open_"):
         draft_id = int(action.replace("open_", ""))
-        with db() as c:
-            row = c.execute("""SELECT id,number,date,task_name,client_name,client_tg,
+        with db() as conn:
+            row = conn.execute("""SELECT id,number,date,task_name,task_description,client_name,client_tg,
                 duration_label,duration_detail,hours,rate,total,email_body,recipients
                 FROM requests WHERE id=? AND status='draft'""", (draft_id,)).fetchone()
         if not row:
             bot.send_message(cid, "Черновик не найден.")
             return
-        keys = ["id","number","date","task_name","client_name","client_tg",
+        keys = ["id","number","date","task_name","task_description","client_name","client_tg",
                 "duration_label","duration_detail","hours","rate","total","email_body","recipients"]
         draft = dict(zip(keys, row))
         draft["selected"], draft["custom_recipients"] = _unpack_recipients(draft["recipients"])
